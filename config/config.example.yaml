@@ -1,0 +1,68 @@
+# Copy to /etc/clash-guard/config.yaml and edit every deployment-specific value.
+# Start with mode: observe and activity.enabled: false. Do not enable automatic
+# changes until validate and an isolated candidate probe have passed.
+version: 1
+mode: observe
+
+# These are examples only. The profile is deliberately not tied to one provider.
+clash_config: /etc/mihomo/config.yaml
+binary: /usr/local/bin/mihomo
+selector: AI Route
+entry: AI Traffic
+business_proxy: http://127.0.0.1:7890
+controller: null
+
+# Use an unauthenticated endpoint whose expected response is stable. This does
+# not prove account, model, quota, or complete streaming health.
+checks:
+  - name: chatgpt-backend
+    url: https://chatgpt.com/backend-api/codex/models
+    status: 401
+    json_contains:
+      detail: Unauthorized
+trace_url: https://chatgpt.com/cdn-cgi/trace
+
+interval_seconds: 60
+failure_count: 3
+failure_span_seconds: 1200
+failure_gap_seconds: 1800
+cooldown_seconds: 1800
+max_attempts_24h: 2
+manual_hold_seconds: 1800
+evaluation_interval_seconds: 600
+same_ip_max_age_seconds: 1800
+allow_cross_ip: true
+cross_ip_failure_span_seconds: 1200
+concurrency: 2
+timeout_seconds: 10
+max_candidates: 128
+include: '.*'
+exclude: '^$'
+preferred_countries: []
+switchable_curl_errors: [5, 6, 7, 28, 35, 52, 55, 56]
+switchable_http_codes: [403]
+journal_unit: clash.service
+journal_domains: [chatgpt.com, openai.com]
+journal_lookback_seconds: 600
+
+# Disabled is safest when the local application has no supported evidence
+# adapter. The automatic `check` command refuses to fall back to polling.
+activity:
+  enabled: false
+  strategy: faults-only
+  provider: codex
+  call_records_path: /var/lib/codex-proxy/call-records.sqlite
+  error_log_path: /var/lib/codex-proxy/error-log.jsonl
+  window_seconds: 900
+  probe_cooldown_seconds: 600
+  min_error_requests: 3
+  error_span_seconds: 120
+  max_probes_24h: 6
+  max_evaluations_24h: 2
+  error_kinds: [StreamUpstreamError, StreamUpstreamPrematureClose, RequestError, UpstreamError]
+
+state_dir: /var/lib/clash-guard
+run_lock: /run/lock/clash-guard.lock
+mutation_lock: /run/lock/clash-config-update.lock
+probe_lock: /run/lock/clash-selector-probe.lock
+manual_history: /var/lib/clash-selector/history.json

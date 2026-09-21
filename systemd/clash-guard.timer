@@ -1,0 +1,11 @@
+[Unit]
+Description=Observe local application evidence for Mihomo route guard
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=30s
+AccuracySec=10s
+Unit=clash-guard.service
+
+[Install]
+WantedBy=timers.target

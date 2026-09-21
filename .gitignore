@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Never commit live Clash/codex-proxy material.
+*.yaml
+*.yml
+!config/*.example.yaml
+*.json
+!package.json
+*.jsonl
+*.sqlite
+*.sqlite-*
+*.log
+state/
+backups/
+secrets/
+coverage.xml
+.coverage

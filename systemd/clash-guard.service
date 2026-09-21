@@ -1,0 +1,14 @@
+[Unit]
+Description=Demand-driven Mihomo route guard (passive unless real requests fail)
+After=clash.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clash-guard check
+User=root
+UMask=0077
+TimeoutStartSec=20min
+TimeoutStopSec=30s
+KillMode=control-group
+Nice=10
+NoNewPrivileges=true

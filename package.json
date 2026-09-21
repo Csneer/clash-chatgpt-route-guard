@@ -1,0 +1,7 @@
+{
+  "name": "clash-chatgpt-route-guard",
+  "version": "1.0.0",
+  "description": "Conservative, demand-driven Mihomo route guard for ChatGPT-compatible traffic",
+  "private": false,
+  "license": "MIT"
+}
