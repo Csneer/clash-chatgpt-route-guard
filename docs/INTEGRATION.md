@@ -12,6 +12,17 @@
 
 ## 更新器契约
 
+如果供应商订阅包含 `url-test`、`fallback` 或 `load-balance`，可先在临时文件上运行：
+
+```bash
+mihomo-manualize --source /tmp/subscription.yaml \
+  --runtime-config /etc/mihomo/config.yaml \
+  --output /tmp/subscription.manual.yaml
+mihomo -t -f /tmp/subscription.manual.yaml -d /etc/mihomo
+```
+
+该工具只把自动组转换为 `select`、保留当前运行时选择并开启 `store-selected`；选中成员消失、配置损坏或保护段变化时拒绝输出。它不会覆盖输入文件，也不会自行加载或重启 Mihomo。
+
 更新器可以继续由供应商/机器维护，但必须：
 
 - 使用 `/run/lock/clash-config-update.lock`（或 profile 中相同的 `mutation_lock`）。

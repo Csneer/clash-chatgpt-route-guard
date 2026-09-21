@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/python3 -B /usr/local/lib/clash-chatgpt-route-guard/mihomo_manualize.py "$@"

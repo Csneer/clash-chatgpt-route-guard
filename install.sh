@@ -15,8 +15,10 @@ install -d -m 0755 "$lib_dir" "$config_dir" "$state_dir" /usr/local/sbin /run/lo
 install -m 0644 "$root_dir/src/clash_guard.py" "$lib_dir/clash_guard.py"
 install -m 0644 "$root_dir/src/clash_demand.py" "$lib_dir/clash_demand.py"
 install -m 0644 "$root_dir/src/clash_common.py" "$lib_dir/clash_common.py"
+install -m 0644 "$root_dir/src/mihomo_manualize.py" "$lib_dir/mihomo_manualize.py"
 install -m 0644 "$root_dir/src/mihomo_policy.py" "$lib_dir/mihomo_policy.py"
 install -m 0755 "$root_dir/bin/clash-guard" /usr/local/sbin/clash-guard
+install -m 0755 "$root_dir/bin/mihomo-manualize" /usr/local/sbin/mihomo-manualize
 install -m 0644 "$root_dir/systemd/clash-guard.service" /etc/systemd/system/clash-guard.service
 install -m 0644 "$root_dir/systemd/clash-guard.timer" /etc/systemd/system/clash-guard.timer
 
