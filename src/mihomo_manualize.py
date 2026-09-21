@@ -57,8 +57,9 @@ def manualize(text, selected):
         raise policy.PolicyError('profile must be a mapping')
     profile['store-selected'] = True
     updated['profile'] = profile
-    if set(source) != set(updated) or any(source.get(key) != updated.get(key)
-                                          for key in set(source) - {'proxy-groups', 'profile'}):
+    protected = set(source) | set(updated)
+    protected -= {'proxy-groups', 'profile'}
+    if any(source.get(key) != updated.get(key) for key in protected):
         raise policy.PolicyError('manualization changed a protected top-level section')
     result = policy.replace_sections(text, {'proxy-groups': updated['proxy-groups'],
                                             'profile': updated['profile']})
