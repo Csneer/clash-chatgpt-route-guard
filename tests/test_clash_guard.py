@@ -56,6 +56,7 @@ class Base(unittest.TestCase):
         self.live = {p['name']: {'type': 'Shadowsocks'} for p in self.config['proxies']}
         self.live.update({g['name']: dict(type='Selector', now=g['proxies'][0], all=g['proxies'][:]) for g in self.config['proxy-groups']})
         self.requests = []
+        self.runtime_mode = 'rule'
         patch = mock.patch.object(policy, 'api', side_effect=self.api)
         patch.start()
         self.addCleanup(patch.stop)
@@ -67,7 +68,7 @@ class Base(unittest.TestCase):
     def api(self, config, path, method='GET', data=None, timeout=3):
         self.requests.append((method, path, data))
         if path == '/configs':
-            return dict(mode='rule', port=17890)
+            return dict(mode=self.runtime_mode, port=17890)
         if path == '/proxies':
             return {'proxies': copy.deepcopy(self.live)}
         if path == '/rules':
@@ -162,7 +163,7 @@ class ConfigTests(Base):
         business.assert_not_called()
         self.assertFalse(self.mutations())
 
-    def test_global_mode_not_silently_adopted(self):
+    def test_global_without_runtime_selector_rejected(self):
         original = self.api
         def api(config, path, *args, **kwargs):
             if path == '/configs': return dict(mode='global', port=17890)
@@ -171,6 +172,36 @@ class ConfigTests(Base):
             with self.assertRaises(guard.Error): self.g.snapshot()
         self.assertFalse(self.mutations())
 
+    def test_global_snapshot_uses_virtual_global_selector(self):
+        self.runtime_mode = 'global'
+        self.config['mode'] = 'global'
+        self.live['GLOBAL'] = dict(type='Selector', now='A', all=['A', 'B', 'C'])
+        snap = self.g.snapshot()
+        self.assertEqual(snap['mode'], 'global')
+        self.assertEqual(snap['selector'], 'GLOBAL')
+        self.assertEqual(snap['selected'], 'A')
+        self.assertEqual(snap['route']['leaf'], 'A')
+        candidates, skipped = self.g.candidates(snap)
+        self.assertEqual(set(candidates), {'A', 'B', 'C'})
+        self.assertFalse(skipped)
+        self.assertFalse(self.mutations())
+
+    def test_unsupported_runtime_mode_rejected(self):
+        self.runtime_mode = 'direct'
+        with self.assertRaises(guard.Error):
+            self.g.snapshot()
+
+    def test_global_transaction_puts_virtual_selector_without_rewriting_yaml(self):
+        self.runtime_mode = 'global'
+        self.config['mode'] = 'global'
+        self.live['GLOBAL'] = dict(type='Selector', now='A', all=['A', 'B', 'C'])
+        snap = self.g.snapshot()
+        with mock.patch.object(self.g, 'business', return_value=report()):
+            self.g.transaction(snap, 'B', {})
+        self.assertEqual(self.live['GLOBAL']['now'], 'B')
+        self.assertEqual([r[1] for r in self.mutations()], ['/proxies/GLOBAL'])
+        self.assertEqual(policy.read(self.path), self.text)
+
     def test_wrong_runtime_route_not_silently_adopted(self):
         original = self.api
         def api(config, path, *args, **kwargs):
@@ -178,6 +209,219 @@ class ConfigTests(Base):
             return original(config, path, *args, **kwargs)
         with mock.patch.object(policy, 'api', side_effect=api):
             with self.assertRaises(guard.Error): self.g.snapshot()
+        self.assertFalse(self.mutations())
+
+
+class RuntimeModeTests(Base):
+    def setUp(self):
+        super(RuntimeModeTests, self).setUp()
+        self.live['GLOBAL'] = dict(type='Selector', now='A', all=['A', 'B', 'C', 'DIRECT', 'provider-only'])
+
+    def test_global_ignores_rule_entry_and_keeps_file_mode(self):
+        self.runtime_mode = 'global'
+        self.cfg.update(entry='Missing', selector='Missing')
+        self.config.pop('rules')
+        write(self.path, yaml.safe_dump(self.config))
+        snap = self.g.snapshot()
+        self.assertEqual(snap['selector'], 'GLOBAL')
+        self.assertIsNone(snap['entry'])
+        self.assertFalse(any(r[1] == '/rules' for r in self.requests))
+        eligible, skipped = self.g.candidates(snap)
+        self.assertEqual(set(eligible), {'A', 'B', 'C'})
+        self.assertEqual(set(skipped), {'DIRECT', 'provider-only'})
+        self.assertEqual(snap['config']['mode'], 'rule')
+
+    def test_switch_back_to_rule_uses_entry_and_selector(self):
+        self.runtime_mode = 'global'
+        global_snap = self.g.snapshot()
+        self.runtime_mode = 'rule'
+        rule_snap = self.g.snapshot()
+        self.assertEqual(rule_snap['selector'], 'Choice')
+        self.assertEqual(rule_snap['route']['choices'], {'Service': 'Choice', 'Choice': 'A'})
+        self.assertNotEqual(global_snap['token'], rule_snap['token'])
+
+    def test_rule_entry_must_actually_traverse_selector(self):
+        self.live['Service']['now'] = 'B'
+        self.live['Service']['all'].append('B')
+        self.config['proxy-groups'][0]['proxies'].append('B')
+        write(self.path, yaml.safe_dump(self.config))
+        with self.assertRaises(guard.Error):
+            self.g.snapshot()
+
+    def test_mode_change_clears_legacy_evidence_and_holds(self):
+        self.state()
+        self.runtime_mode = 'global'
+        with mock.patch.object(self.g, 'business', return_value=report(False)), \
+                mock.patch.object(self.g, 'evaluate') as evaluate:
+            self.assertEqual(self.g.cycle(), 'hold')
+        state = common.load_json(self.g.state_path, {})
+        self.assertEqual(state['runtime_mode'], 'global')
+        self.assertEqual(state['runtime_selector'], 'GLOBAL')
+        self.assertEqual(state['failures'], [])
+        self.assertEqual(state['last_good'], {})
+        self.assertGreater(state['hold_until'], time.time())
+        evaluate.assert_not_called()
+        self.assertFalse(self.mutations())
+
+    def test_mode_change_before_transaction_never_puts(self):
+        snap = self.g.snapshot()
+        self.runtime_mode = 'global'
+        with self.assertRaises(guard.Error):
+            self.g.transaction(snap, 'B', {})
+        self.assertFalse(self.mutations())
+        self.assertEqual(policy.read(self.path), self.text)
+
+    def test_mode_change_with_pending_clears_evidence_but_keeps_wal(self):
+        self.state(runtime_mode='rule', runtime_selector='Choice', pending={'target': 'B'}, last_result=report())
+        self.runtime_mode = 'global'
+        with mock.patch.object(self.g, 'business', return_value=report(False)):
+            self.assertEqual(self.g.cycle(), 'pending')
+        state = common.load_json(self.g.state_path, {})
+        self.assertEqual(state['pending'], {'target': 'B'})
+        self.assertEqual(state['runtime_mode'], 'global')
+        self.assertEqual((state['failures'], state['last_good'], state['last_result']), ([], {}, {}))
+
+    def test_unsupported_mode_clears_old_evidence_without_probe(self):
+        self.state(runtime_mode='rule')
+        self.runtime_mode = 'direct'
+        with mock.patch.object(self.g, 'business') as business:
+            with self.assertRaises(guard.Error):
+                self.g.cycle()
+        state = common.load_json(self.g.state_path, {})
+        self.assertEqual(state['runtime_mode'], 'direct')
+        self.assertEqual(state['failures'], [])
+        self.assertEqual(state['last_good'], {})
+        business.assert_not_called()
+
+    def test_candidate_global_dialer_change_invalidates_rule_snapshot(self):
+        self.config['proxies'][1]['dialer-proxy'] = 'GLOBAL'
+        write(self.path, yaml.safe_dump(self.config))
+        snap = self.g.snapshot()
+        self.assertIn('B', self.g.candidates(snap)[0])
+        self.live['GLOBAL']['now'] = 'C'
+        self.assertNotEqual(self.g.snapshot()['token'], snap['token'])
+
+    def test_mode_change_after_put_preserves_pending_without_rollback(self):
+        self.runtime_mode = 'global'
+        snap = self.g.snapshot()
+        setter = self.g.set_choice
+        def change_mode(snap, target):
+            setter(snap, target)
+            self.runtime_mode = 'rule'
+        with mock.patch.object(self.g, 'set_choice', side_effect=change_mode):
+            with self.assertRaises(guard.Error):
+                self.g.transaction(snap, 'B', {})
+        self.assertEqual([r[1] for r in self.mutations()], ['/proxies/GLOBAL'])
+        self.assertEqual(self.live['Choice']['now'], 'A')
+        self.assertEqual(self.live['GLOBAL']['now'], 'B')
+        pending = common.load_json(self.g.state_path, {})['pending']
+        self.assertEqual((pending['mode'], pending['selector']), ('global', 'GLOBAL'))
+        self.assertEqual(policy.read(self.path), self.text)
+
+    def test_mode_change_during_postcheck_preserves_pending(self):
+        self.runtime_mode = 'global'
+        def business():
+            self.runtime_mode = 'rule'
+            return report()
+        with mock.patch.object(self.g, 'business', side_effect=business):
+            with self.assertRaises(guard.Error):
+                self.g.transaction(self.g.snapshot(), 'B', {})
+        self.assertEqual(len(self.mutations()), 1)
+        self.assertIsNotNone(common.load_json(self.g.state_path, {})['pending'])
+        self.assertEqual(policy.read(self.path), self.text)
+
+    def test_mode_change_during_wal_never_puts(self):
+        snap = self.g.snapshot()
+        save = self.g.save
+        def save_and_change(state):
+            save(state)
+            self.runtime_mode = 'global'
+        with mock.patch.object(self.g, 'save', side_effect=save_and_change):
+            with self.assertRaises(guard.Error):
+                self.g.transaction(snap, 'B', {})
+        self.assertFalse(self.mutations())
+
+    def test_global_success_does_not_write_generated_file(self):
+        self.runtime_mode = 'global'
+        with mock.patch.object(self.g, 'business', return_value=report()), \
+                mock.patch.object(policy, 'atomic_write') as writer:
+            self.g.transaction(self.g.snapshot(), 'B', {})
+        writer.assert_not_called()
+        self.assertEqual(self.live['Choice']['now'], 'A')
+        self.assertEqual(self.live['GLOBAL']['now'], 'B')
+
+    def test_global_without_store_selected_refuses_before_put(self):
+        self.runtime_mode = 'global'
+        self.config['profile']['store-selected'] = False
+        write(self.path, yaml.safe_dump(self.config))
+        with self.assertRaises(guard.Error):
+            self.g.transaction(self.g.snapshot(), 'B', {})
+        self.assertFalse(self.mutations())
+
+    def test_global_explicit_group_persist_preserves_mode_and_other_groups(self):
+        self.runtime_mode = 'global'
+        self.config['proxy-groups'].append(dict(name='GLOBAL', type='select', proxies=['A', 'B', 'C']))
+        write(self.path, yaml.safe_dump(self.config))
+        with mock.patch.object(self.g, 'business', return_value=report()):
+            self.g.transaction(self.g.snapshot(), 'B', {})
+        updated = policy.parse(policy.read(self.path))
+        self.assertEqual(updated['proxy-groups'][-1]['proxies'], ['B', 'A', 'C'])
+        self.assertEqual(updated['proxy-groups'][:-1], self.config['proxy-groups'][:-1])
+        self.assertEqual(updated['mode'], 'rule')
+
+    def test_global_failed_postcheck_rolls_back_once(self):
+        self.runtime_mode = 'global'
+        with mock.patch.object(self.g, 'business', return_value=report(False)):
+            with self.assertRaises(guard.Error):
+                self.g.transaction(self.g.snapshot(), 'B', {})
+        self.assertEqual(self.live['GLOBAL']['now'], 'A')
+        self.assertEqual([r[1] for r in self.mutations()], ['/proxies/GLOBAL', '/proxies/GLOBAL'])
+        self.assertIsNone(common.load_json(self.g.state_path, {})['pending'])
+
+    def test_global_dependency_cannot_reenter_global(self):
+        self.runtime_mode = 'global'
+        self.config['proxies'][1]['dialer-proxy'] = 'GLOBAL'
+        write(self.path, yaml.safe_dump(self.config))
+        eligible, skipped = self.g.candidates(self.g.snapshot())
+        self.assertNotIn('B', eligible)
+        self.assertIn('B', skipped)
+
+    def test_global_manual_selection_invalidates_token(self):
+        self.runtime_mode = 'global'
+        snap = self.g.snapshot()
+        self.live['GLOBAL']['now'] = 'B'
+        self.assertNotEqual(self.g.snapshot()['token'], snap['token'])
+
+    def test_global_selection_invalidates_rule_candidate_evidence(self):
+        snap = self.g.snapshot()
+        self.live['GLOBAL']['now'] = 'B'
+        self.assertNotEqual(self.g.snapshot()['token'], snap['token'])
+
+    def test_global_in_rule_dependency_invalidates_token(self):
+        self.config['proxy-groups'][1]['proxies'].append('GLOBAL')
+        self.live['Choice']['all'].append('GLOBAL')
+        self.live['Choice']['now'] = 'GLOBAL'
+        write(self.path, yaml.safe_dump(self.config))
+        before = self.g.snapshot()
+        self.live['GLOBAL']['now'] = 'B'
+        after = self.g.snapshot()
+        self.assertNotEqual(before['route']['leaf'], after['route']['leaf'])
+        self.assertNotEqual(before['token'], after['token'])
+
+    def test_evaluation_exception_after_mode_change_clears_evidence(self):
+        self.state()
+        def evaluate(*args, **kwargs):
+            self.runtime_mode = 'global'
+            raise guard.Error('runtime changed')
+        with mock.patch.object(guard.time, 'time', return_value=10000), \
+                mock.patch.object(self.g, 'business', return_value=report(False)), \
+                mock.patch.object(self.g, 'evaluate', side_effect=evaluate):
+            self.assertEqual(self.g.cycle(), 'changed')
+        state = common.load_json(self.g.state_path, {})
+        self.assertEqual(state['failures'], [])
+        self.assertEqual(state['last_good'], {})
+        self.assertEqual(state['runtime_mode'], 'global')
+        self.assertGreater(state['hold_until'], 10000)
         self.assertFalse(self.mutations())
 
 

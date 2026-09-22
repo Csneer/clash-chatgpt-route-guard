@@ -192,6 +192,68 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(self.g.snapshot()['selected'], 'good')
         self.assertTrue(self.g.business()['ok'])
 
+    def test_real_global_switch_then_rule_follows_runtime_without_mode_writes(self):
+        # Simulate the user's UI changing only runtime mode. The guard must
+        # follow it even though the YAML still says rule and has no GLOBAL.
+        policy.api(self.config, '/proxies/GLOBAL', 'PUT', {'name': 'bad'})
+        policy.api(self.config, '/configs', 'PATCH', {'mode': 'global'})
+        original = policy.read(self.path)
+        snap = self.g.snapshot()
+        self.assertEqual((snap['mode'], snap['selector'], snap['selected']), ('global', 'GLOBAL', 'bad'))
+        results, _ = self.g.evaluate(snap)
+        self.assertTrue(results['good']['ok'])
+        self.assertFalse(results['bad']['ok'])
+        api = policy.api
+        writes = []
+        def recorded(config, path, method='GET', data=None, **kwargs):
+            if method != 'GET':
+                writes.append((method, path))
+            return api(config, path, method, data, **kwargs)
+        with mock.patch.object(policy, 'api', side_effect=recorded):
+            with common.locked(self.cfg['mutation_lock']):
+                self.g.transaction(snap, 'good', {})
+        self.assertEqual(writes, [('PUT', '/proxies/GLOBAL')])
+        self.assertTrue(self.g.business()['ok'])
+        self.assertEqual(policy.read(self.path), original)
+        self.assertEqual(self.g.snapshot()['selected'], 'good')
+        policy.api(self.config, '/configs', 'PATCH', {'mode': 'rule'})
+        rule = self.g.snapshot()
+        self.assertEqual((rule['mode'], rule['selector'], rule['selected']), ('rule', 'Selection', 'bad'))
+        self.assertNotEqual(rule['token'], snap['token'])
+
+    def test_real_global_failed_postcheck_rolls_back(self):
+        policy.api(self.config, '/proxies/GLOBAL', 'PUT', {'name': 'good'})
+        policy.api(self.config, '/configs', 'PATCH', {'mode': 'global'})
+        original = policy.read(self.path)
+        with common.locked(self.cfg['mutation_lock']):
+            with self.assertRaises(guard.Error):
+                self.g.transaction(self.g.snapshot(), 'bad', {})
+        self.assertEqual(self.g.snapshot()['selected'], 'good')
+        self.assertTrue(self.g.business()['ok'])
+        self.assertEqual(policy.read(self.path), original)
+
+    def test_real_virtual_global_selection_survives_restart_in_mihomo_cache(self):
+        policy.api(self.config, '/proxies/GLOBAL', 'PUT', {'name': 'bad'})
+        policy.api(self.config, '/configs', 'PATCH', {'mode': 'global'})
+        with common.locked(self.cfg['mutation_lock']):
+            self.g.transaction(self.g.snapshot(), 'good', {})
+        # Restart only this disposable instance. File mode stays rule; the
+        # controller should retain GLOBAL's selection independently of it.
+        self.stop()
+        self.process = subprocess.Popen([MIHOMO_BINARY, '-f', self.path, '-d', self.tmp.name],
+                                        stdout=self.log, stderr=subprocess.STDOUT)
+        for _ in range(50):
+            try:
+                live = policy.api(self.config, '/proxies')['proxies']
+                if live.get('GLOBAL', {}).get('now') == 'good':
+                    break
+            except OSError:
+                pass
+            time.sleep(.1)
+        else:
+            self.fail('GLOBAL selection not restored from the isolated Mihomo cache')
+        self.assertEqual(policy.parse(policy.read(self.path))['mode'], 'rule')
+
     def test_real_failed_postcheck_rolls_back_to_working_chain(self):
         with common.locked(self.cfg['mutation_lock']):
             self.g.transaction(self.g.snapshot(), 'good', {})

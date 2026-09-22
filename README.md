@@ -2,11 +2,12 @@
 
 一个保守的 Mihomo/Clash 出口守护方案：它把本机真实业务失败作为自动处理的前提，只在持续的网络类失败出现时，才复核 ChatGPT 兼容接口、隔离评估候选节点，并在满足安全条件后切换受管理的 `select` 组。
 
-核心目标是避免“定时证明自己正常”造成固定外连特征，也避免因为一次 403、429、5xx、客户端取消或机场上游过载就换出口。正常调用和空闲时，systemd timer 只读取本地证据，不访问外部 ChatGPT 接口。
+核心目标是避免“定时证明自己正常”造成固定外连特征，也避免因为一次 403、429、5xx、客户端取消或机场上游过载就换出口。正常调用和空闲时，systemd timer 只读取本地证据和 Clash 当前模式，不访问外部 ChatGPT 接口。
 
 ## 特性
 
-- profile 驱动：Clash 配置路径、Mihomo 二进制、业务入口组、受管理选择器、HTTP 监听和检查地址均可替换。
+- profile 驱动：Clash 配置路径、Mihomo 二进制、业务入口组、受管理选择器、HTTP 监听和检查地址均可替换；守护器只读取 Clash 当前 `global/rule` 模式，不替用户选择模式。
+- `global` 模式监控 Mihomo 内置 `GLOBAL` 选择器，`rule` 模式监控配置的业务 selector；模式变化会清理旧证据并进入保护期。
 - `faults-only` 活动策略：成功调用不探测；空闲不探测；本地证据源不可读时 fail-closed。
 - 至少 3 个新的、不同 request ID 的网络类失败，并跨越最小时间窗口，才开始低频复核。
 - `StreamUpstreamPrematureClose` 纳入证据；客户端中止、上游过载、账号/限额、429、全部 5xx、证书错误不作为出口故障依据。
@@ -18,7 +19,7 @@
 
 ## 安装
 
-依赖：Linux、systemd、Python 3.6+、PyYAML、curl、可执行的 Mihomo，以及一个只监听回环地址的 HTTP/mixed 业务代理。安装脚本不会启用定时器，也不会覆盖已有 profile。
+依赖：Linux、systemd、Python 3.6+、PyYAML、curl、可执行的 Mihomo，以及一个通过回环地址访问的 HTTP/mixed 业务代理。控制器支持回环 TCP 和 `external-controller-unix` 绝对 socket 路径；非空 TCP 配置优先。安装脚本不会启用定时器，也不会覆盖已有 profile。
 
 ```bash
 git clone https://github.com/Csneer/clash-chatgpt-route-guard.git
@@ -28,12 +29,23 @@ sudoedit /etc/clash-guard/config.yaml
 sudo clash-guard validate
 ```
 
+在没有 root 权限的环境中可以先做离线安装演练，不会写入系统目录：
+
+```bash
+DESTDIR="$PWD/.stage" PREFIX=/opt/clash-guard ./install.sh
+CLASH_GUARD_LIB="$PWD/.stage/opt/clash-guard/lib/clash-chatgpt-route-guard" \
+  "$PWD/.stage/opt/clash-guard/sbin/clash-guard" --help
+rm -rf .stage
+```
+
+`DESTDIR` 只用于打包或测试；真实部署仍应使用默认路径并由 root 执行。`PREFIX` 会同时调整程序、命令和 systemd 服务中的 `ExecStart` 路径。
+
 初次部署使用 `config/config.example.yaml`；若本机的 codex-proxy 使用仓库文档所述的 SQLite/JSONL 证据格式，可参考 `config/config.codex-proxy.example.yaml`。先使用 `mode: observe`，确认 `validate`、显式 `probe` 和手动 `menu` 均符合预期，再考虑自动模式。
 
 启用自动模式前，必须完成以下替换：
 
-1. `clash_config`、`binary`、`selector`、`entry` 和 `business_proxy`。
-2. 检查 URL、预期状态/JSON 字段，以及检查域名在 Clash 规则中确实首先经过 `entry`。
+1. `clash_config`、`binary`、`selector`、`entry` 和 `business_proxy`。`selector`/`entry` 只在 Clash `rule` 模式使用；`global` 模式固定跟随内置 `GLOBAL`。
+2. 检查 URL、预期状态/JSON 字段；在 Clash `rule` 模式下，检查域名必须首先经过 `entry`。
 3. `selector` 必须是运行时 `Selector`，候选必须是其显式成员；不要让守护器接管 `url-test`、`fallback` 或 `load-balance`。
 4. `activity` 必须指向真实业务证据；不支持的应用格式不要只改路径伪装成兼容。
 5. `mode: auto` 和 `activity.enabled: true` 同时使用，并保留 `strategy: faults-only`。

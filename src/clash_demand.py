@@ -164,6 +164,31 @@ def run(g, emit, read_journal):
             g.save(state)
         return reason
 
+    def clear_runtime_evidence(mode, reason='runtime-mode-hold'):
+        """Drop evidence tied to a previous Clash runtime mode/selection."""
+        selector = 'GLOBAL' if mode == 'global' else (g.cfg.get('selector') if mode == 'rule' else None)
+        d.update(baseline_at=time.time(), consumed_until=time.time(), confirmations=[], trace={})
+        state.update(runtime_mode=mode, runtime_selector=selector,
+                     hold_until=time.time() + g.cfg['manual_hold_seconds'], failures=[],
+                     last_good={}, last_result={}, token=None)
+        g.save(state)
+        return reason
+
+    # Clash owns mode selection.  Poll it every local tick, including idle
+    # ticks, but never change it from this daemon.
+    def monitor_mode():
+        try:
+            mode = g.runtime_mode()
+        except (common.SelectorError, OSError, ValueError):
+            return clear_runtime_evidence(None, 'runtime-mode-unavailable')
+        if mode not in ('rule', 'global'):
+            return clear_runtime_evidence(mode, 'unsupported-mode')
+        if state.get('runtime_mode') != mode:
+            return clear_runtime_evidence(mode)
+        return None
+
+    mode_reason = monitor_mode()
+
     # Observe journals every LOCAL tick, not only when external probes are allowed.
     logs = read_journal(cfg, state.get('journal_cursor_us', 0), now)
     state.update(journal_cursor_us=logs['cursor_us'], journal_available=logs['available'])
@@ -174,13 +199,15 @@ def run(g, emit, read_journal):
     ev = evidence(cfg, now)
     d.update(success_at=ev['success_at'], network_errors=len(ev['faults']),
              sources_available=ev['available'], ignored_errors=ev['ignored'])
-    # Config/manual file changes invalidate old evidence without contacting Clash.
+    # Initialize the file signature and runtime baseline in the same tick.
     marker = common.load_json(cfg['manual_history'], {}) if cfg['manual_history'] else {}
     signature = common.fingerprint({'text': policy.read(cfg['clash_config']), 'cfg': cfg, 'manual': marker})
     if d.get('signature') != signature or now < d.get('last_tick', 0):
         d.update(signature=signature, baseline_at=now, consumed_until=now, trace={}, confirmations=[])
-        state.update(hold_until=now + cfg['manual_hold_seconds'], failures=[])
-        return done('baseline-hold')
+        state.update(hold_until=now + cfg['manual_hold_seconds'], failures=[], last_good={}, last_result={})
+        return done(mode_reason if mode_reason in ('unsupported-mode', 'runtime-mode-unavailable') else 'baseline-hold')
+    if mode_reason:
+        return done(mode_reason)
     if not ev['available']:
         d.update(confirmations=[], trace={})
         state['failures'] = []
@@ -219,6 +246,9 @@ def run(g, emit, read_journal):
         if '另一个更新/切换/评估正在进行' in str(error):
             return done('busy')
         raise
+    mode_reason = monitor_mode()
+    if mode_reason:
+        return done(mode_reason)
     if state.get('token') != snap['token']:
         state.update(token=snap['token'], hold_until=now + cfg['manual_hold_seconds'], failures=[])
         d.update(baseline_at=now, consumed_until=now, confirmations=[], trace={})
@@ -229,6 +259,9 @@ def run(g, emit, read_journal):
     g.save(state)  # Durable budget/consumption before issuing any request.
     active_probe = True
     report = g.business()
+    mode_reason = monitor_mode()
+    if mode_reason:
+        return done(mode_reason)
     emit('fault_confirmation', target=snap['selected'], new_errors=len(fresh), **report)
     state.update(last_check=now, last_result=report)
     if report['ok'] or not report['switchable']:
@@ -264,8 +297,14 @@ def run(g, emit, read_journal):
 
     if not still_needed():
         return done('demand-ended-or-recovered')
+    mode_reason = monitor_mode()
+    if mode_reason:
+        return done(mode_reason)
     # Preflight current path before a potentially expensive candidate scan.
     current = g.business()
+    mode_reason = monitor_mode()
+    if mode_reason:
+        return done(mode_reason)
     if current['ok'] or not current['switchable']:
         d.update(confirmations=[], trace={}, recovered_at=time.time())
         state.update(failures=[], last_result=current)
@@ -274,7 +313,16 @@ def run(g, emit, read_journal):
     d.update(trace=trace, evaluations=evaluations + [time.time()])
     state['last_evaluation'] = time.time()
     g.save(state)
-    results, skipped = g.evaluate(snap)
+    try:
+        results, skipped = g.evaluate(snap)
+    except common.SelectorError:
+        mode_reason = monitor_mode()
+        if mode_reason:
+            return done(mode_reason)
+        raise
+    mode_reason = monitor_mode()
+    if mode_reason:
+        return done(mode_reason)
     common.save_json(os.path.join(cfg['state_dir'], 'evaluation.json'),
                      {'at': time.time(), 'results': results, 'skipped': skipped, 'trigger': 'business-network-errors'})
     old_ip = trace.get('ip', '') if trace.get('samples', 0) >= 2 else ''
@@ -298,7 +346,16 @@ def run(g, emit, read_journal):
         emit('would_switch', target=sorted(options)[0][-1])
         return done('observe-only')
     target = sorted(options)[0][-1]
-    fresh_result, _ = g.evaluate(snap, only=target)
+    try:
+        fresh_result, _ = g.evaluate(snap, only=target)
+    except common.SelectorError:
+        mode_reason = monitor_mode()
+        if mode_reason:
+            return done(mode_reason)
+        raise
+    mode_reason = monitor_mode()
+    if mode_reason:
+        return done(mode_reason)
     chosen = fresh_result[target]
     if not chosen['ok']:
         return done('candidate-unstable')
@@ -306,10 +363,16 @@ def run(g, emit, read_journal):
     if not same and not cross_allowed:
         return done('candidate-ip-changed')
     with common.locked(cfg['mutation_lock']):
+        mode_reason = monitor_mode()
+        if mode_reason:
+            return done(mode_reason)
         latest = g.snapshot()
         if latest['token'] != snap['token'] or not still_needed():
             return done('changed-or-recovered')
         final = g.business()
+        mode_reason = monitor_mode()
+        if mode_reason:
+            return done(mode_reason)
         if final['ok'] or not final['switchable']:
             d.update(confirmations=[], trace={}, recovered_at=time.time())
             state.update(failures=[], last_result=final)
@@ -317,6 +380,9 @@ def run(g, emit, read_journal):
         # Never advertise a stale same-egress comparison after a long scan.
         if same and (final.get('ip') != old_ip or time.time() - trace['at'] > cfg['same_ip_max_age_seconds']):
             return done('current-egress-changed')
+        mode_reason = monitor_mode()
+        if mode_reason:
+            return done(mode_reason)
         if g.snapshot()['token'] != snap['token'] or not still_needed():
             return done('changed-or-recovered')
         g.transaction(latest, target, state, required_ip=old_ip if same else None)

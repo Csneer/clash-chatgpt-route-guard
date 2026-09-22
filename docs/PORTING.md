@@ -4,8 +4,8 @@
 
 在目标机上准备一份脱敏的拓扑认知：
 
-- 运行模式必须是 `rule`。
-- 检查域名的第一条匹配规则必须指向业务入口组。
+- 守护器会读取运行时模式：`global` 使用内置 `GLOBAL`，`rule` 使用下方配置的业务入口和选择器；守护器不会修改模式。
+- `rule` 模式下检查域名的第一条匹配规则必须指向业务入口组。
 - 业务入口最终必须经过一个 `select` 组，再落到物理节点或明确的固定 select 链。
 - 所有候选必须是受管理选择器的显式成员。
 - `url-test`、`fallback`、`load-balance` 不作为自动切换目标；如确实需要，先转换成由人工确认的 select 适配层。
@@ -23,7 +23,7 @@ sudoedit /etc/clash-guard/config.yaml
 sudo clash-guard validate
 ```
 
-`validate` 读取回环控制器、规则和候选图，但不会调用 ChatGPT 业务 URL。之后可以明确执行 `clash-guard observe` 和 `clash-guard probe`，确认结果符合目标机实际链路。第一次使用保持 `mode: observe`。
+`validate` 读取回环控制器、当前 Clash 模式、选择器和候选图，但不会调用 ChatGPT 业务 URL。之后可以明确执行 `clash-guard observe` 和 `clash-guard probe`，确认结果符合目标机实际链路。第一次使用保持守护配置 `mode: observe`。若 Clash Verge 只开放 `external-controller-unix`，请在 Clash YAML 中保留该绝对 socket 路径；守护器会通过本地 Unix HTTP 控制器访问它。
 
 ## 3. 接入本地应用证据
 

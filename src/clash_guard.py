@@ -216,6 +216,13 @@ def graph(config, live, target):
         if name in visiting:
             raise Error('代理依赖循环。')
         visiting = visiting | {name}
+        if name == 'GLOBAL' and name not in groups:
+            actual = live.get(name, {})
+            selected = actual.get('now')
+            if actual.get('type') != 'Selector' or selected not in actual.get('all', []):
+                raise Error('GLOBAL 选择器状态无效。')
+            choices[name] = selected
+            return visit(selected, visiting)
         if name in groups:
             g, actual = groups[name], live.get(name, {})
             selected = actual.get('now')
@@ -255,7 +262,16 @@ def graph(config, live, target):
 def persist(text, selector, target):
     original = policy.parse(text)
     updated = copy.deepcopy(original)
-    group = next(g for g in updated['proxy-groups'] if g['name'] == selector)
+    group = next((g for g in updated.get('proxy-groups', []) if g['name'] == selector), None)
+    # GLOBAL is a Mihomo virtual selector and may be absent from generated
+    # Verge files. Its runtime choice is changed through /proxies/GLOBAL;
+    # there is no safe YAML section to rewrite in that case.
+    if group is None and selector == 'GLOBAL':
+        if original.get('profile', {}).get('store-selected') is not True:
+            raise Error('内置 GLOBAL 的持久化需要 profile.store-selected: true。')
+        return text
+    if group is None:
+        raise Error('配置中缺少受管理选择器。')
     if group.get('type') != 'select' or target not in group.get('proxies', []):
         raise Error('只允许保存已有 select 的显式成员。')
     group['proxies'] = [target] + [n for n in group['proxies'] if n != target]
@@ -303,51 +319,80 @@ class Guard:
     def save(self, state):
         common.save_json(self.state_path, state)
 
+    def api_config(self, config):
+        result = dict(config)
+        if self.cfg['controller']:
+            result['external-controller'] = self.cfg['controller']
+        return result
+
+    def runtime_mode(self):
+        config = self.api_config(policy.parse(policy.read(self.cfg['clash_config'])))
+        return str(policy.api(config, '/configs').get('mode', '')).lower()
+
+    def hold_runtime_change(self, state, mode, token=None):
+        state.update(token=token, runtime_mode=mode,
+                     runtime_selector='GLOBAL' if mode == 'global' else self.cfg['selector'] if mode == 'rule' else None,
+                     failures=[], last_good={}, last_result={},
+                     hold_until=time.time() + self.cfg['manual_hold_seconds'])
+        self.save(state)
+
     def snapshot(self):
         text = policy.read(self.cfg['clash_config'])
         config = policy.parse(text)
         names = [p['name'] for p in config.get('proxies', []) + config.get('proxy-groups', [])]
-        if len(names) != len(set(names)) or not config.get('rules'):
-            raise Error('代理名称重复或规则缺失。')
-        api_config = dict(config)
-        if self.cfg['controller']:
-            api_config['external-controller'] = self.cfg['controller']
+        if len(names) != len(set(names)):
+            raise Error('代理名称重复。')
+        api_config = self.api_config(config)
         runtime = policy.api(api_config, '/configs')
         port = urllib.parse.urlsplit(self.cfg['business_proxy']).port
-        if (runtime.get('mode') != 'rule' or config.get('mode', 'rule').lower() != 'rule'
-                or port not in (runtime.get('port'), runtime.get('mixed-port'))):
-            raise Error('需要 rule 模式及匹配的业务 HTTP/mixed 监听。')
+        runtime_mode = str(runtime.get('mode', '')).lower()
+        if runtime_mode not in ('rule', 'global'):
+            raise Error('当前 Clash 模式不支持选择器守护。')
+        if port not in (runtime.get('port'), runtime.get('mixed-port')):
+            raise Error('业务 HTTP/mixed 监听与运行时不匹配。')
         live = policy.api(api_config, '/proxies')['proxies']
-        actual_rules = policy.api(api_config, '/rules')['rules']
-        if len(actual_rules) != len(config['rules']):
-            raise Error('文件与运行时规则数量不同。')
-        urls = [c['url'] for c in self.cfg['checks']] + ([self.cfg['trace_url']] if self.cfg['trace_url'] else [])
-        for url in urls:
-            host = urllib.parse.urlsplit(url).hostname
-            if first_route(config['rules'], host) != self.cfg['entry']:
-                raise Error('探测域名未经过配置的业务入口。')
-        # Compare the ordered runtime prefix up to every probe domain rule.
-        runtime_rules = []
-        for rule in actual_rules:
-            kind = {'Domain': 'DOMAIN', 'DomainSuffix': 'DOMAIN-SUFFIX', 'DomainKeyword': 'DOMAIN-KEYWORD',
-                    'DstPort': 'DST-PORT', 'Network': 'NETWORK', 'Match': 'MATCH'}.get(rule.get('type'), 'UNSUPPORTED')
-            runtime_rules.append(','.join([kind] + ([] if kind == 'MATCH' else [str(rule.get('payload', ''))]) + [rule.get('proxy', '')]))
-        for url in urls:
-            if first_route(runtime_rules, urllib.parse.urlsplit(url).hostname) != self.cfg['entry']:
-                raise Error('运行时探测域名路由与预期不符。')
-        route = graph(config, live, self.cfg['entry'])
-        top = self.cfg['selector']
-        if top not in route['choices'] or live[top].get('type') != 'Selector':
+        top = 'GLOBAL' if runtime_mode == 'global' else self.cfg['selector']
+        entry = None if runtime_mode == 'global' else self.cfg['entry']
+        if runtime_mode == 'rule':
+            if not config.get('rules'):
+                raise Error('rule 模式缺少规则。')
+            actual_rules = policy.api(api_config, '/rules')['rules']
+            if len(actual_rules) != len(config['rules']):
+                raise Error('文件与运行时规则数量不同。')
+            urls = [c['url'] for c in self.cfg['checks']] + ([self.cfg['trace_url']] if self.cfg['trace_url'] else [])
+            for url in urls:
+                host = urllib.parse.urlsplit(url).hostname
+                if first_route(config['rules'], host) != self.cfg['entry']:
+                    raise Error('探测域名未经过配置的业务入口。')
+            # Compare the ordered runtime prefix up to every probe domain rule.
+            runtime_rules = []
+            for rule in actual_rules:
+                kind = {'Domain': 'DOMAIN', 'DomainSuffix': 'DOMAIN-SUFFIX', 'DomainKeyword': 'DOMAIN-KEYWORD',
+                        'DstPort': 'DST-PORT', 'Network': 'NETWORK', 'Match': 'MATCH'}.get(rule.get('type'), 'UNSUPPORTED')
+                runtime_rules.append(','.join([kind] + ([] if kind == 'MATCH' else [str(rule.get('payload', ''))]) + [rule.get('proxy', '')]))
+            for url in urls:
+                if first_route(runtime_rules, urllib.parse.urlsplit(url).hostname) != self.cfg['entry']:
+                    raise Error('运行时探测域名路由与预期不符。')
+        if live.get(top, {}).get('type') != 'Selector' or live[top].get('now') not in live[top].get('all', []):
+            raise Error('当前模式的选择器状态无效。')
+        route = graph(config, live, entry or top)
+        if top not in route['choices']:
             raise Error('业务入口没有经过受管理的手动选择器。')
         marker = common.load_json(self.cfg['manual_history'], {}) if self.cfg['manual_history'] else {}
-        selections = {n: p.get('now') for n, p in live.items() if p.get('type') == 'Selector' and n != 'GLOBAL'}
-        token = common.fingerprint({'text': text, 'selections': selections, 'manual': marker})
-        return {'text': text, 'config': config, 'api': api_config, 'live': live, 'route': route,
-                'selected': live[top]['now'], 'token': token}
+        # Include GLOBAL even in rule mode: a fixed group or dialer-proxy
+        # dependency may refer to it, including in a candidate's graph.
+        selections = {n: p.get('now') for n, p in live.items() if p.get('type') == 'Selector'}
+        token = common.fingerprint({'text': text, 'mode': runtime_mode, 'selector': top,
+                                    'selections': selections, 'manual': marker})
+        if str(policy.api(api_config, '/configs').get('mode', '')).lower() != runtime_mode:
+            raise Error('读取快照期间 Clash 模式变化；取消本次操作。')
+        return {'mode': runtime_mode, 'selector': top, 'entry': entry, 'text': text, 'config': config,
+                'api': api_config, 'live': live, 'route': route, 'selected': live[top]['now'], 'token': token}
 
     def candidates(self, snap):
-        top = self.cfg['selector']
-        explicit = next(g for g in snap['config']['proxy-groups'] if g['name'] == top).get('proxies', [])
+        top = snap['selector']
+        group = next((g for g in snap['config'].get('proxy-groups', []) if g['name'] == top), None)
+        explicit = group.get('proxies', []) if group else snap['live'][top].get('all', [])
         eligible, skipped, seen = {}, {}, set()
         for name in snap['live'][top]['all']:
             if not re.search(self.cfg['include'], name) or re.search(self.cfg['exclude'], name):
@@ -376,10 +421,14 @@ class Guard:
         if only is not None:
             if only not in candidates:
                 # Aliases may have been deduplicated in the full inventory.
-                if only not in snap['live'][self.cfg['selector']]['all']:
+                group = next((g for g in snap['config'].get('proxy-groups', [])
+                              if g['name'] == snap['selector']), None)
+                if (only not in snap['live'][snap['selector']]['all']
+                        or (group is not None and only not in group.get('proxies', []))
+                        or not re.search(self.cfg['include'], only) or re.search(self.cfg['exclude'], only)):
                     raise Error('目标不属于受管理选择器。')
                 g = graph(snap['config'], snap['live'], only)
-                if self.cfg['selector'] in g['choices']:
+                if snap['selector'] in g['choices']:
                     raise Error('候选依赖受管理选择器。')
                 candidates = {only: g}
             else:
@@ -407,25 +456,35 @@ class Guard:
                     result['leaf'] = candidates[name]['leaf']
                     results[name] = result
                     emit('candidate', target=name, **result)
+        if self.snapshot()['token'] != snap['token']:
+            raise Error('评估期间 Clash 模式、配置或选择器变化；丢弃结果。')
         return results, skipped
 
     def business(self):
         return check_proxy(self.cfg, self.cfg['business_proxy'])
 
     def set_choice(self, snap, target):
-        policy.api(snap['api'], '/proxies/' + urllib.parse.quote(self.cfg['selector'], safe=''), 'PUT', {'name': target})
+        if str(policy.api(snap['api'], '/configs').get('mode', '')).lower() != snap['mode']:
+            raise Error('写入前 Clash 模式变化；取消选择器操作。')
+        policy.api(snap['api'], '/proxies/' + urllib.parse.quote(snap['selector'], safe=''), 'PUT', {'name': target})
 
     def transaction(self, snap, target, state, required_ip=None, automatic=True):
         """Shared lock held by caller. Pending WAL survives SIGKILL/power failure."""
         original = snap['text']
-        candidate = persist(original, self.cfg['selector'], target)
+        latest = self.snapshot()
+        if latest['token'] != snap['token']:
+            raise Error('切换前 Clash 模式、配置或选择器已变化。')
+        if target not in snap['live'][snap['selector']]['all']:
+            raise Error('目标不属于受管理选择器。')
+        candidate = persist(original, snap['selector'], target)
         target_graph = graph(snap['config'], snap['live'], target)
-        if self.cfg['selector'] in target_graph['choices']:
+        if snap['selector'] in target_graph['choices']:
             raise Error('切换目标会改变自身依赖。')
         backup = os.path.join(self.cfg['state_dir'], 'pre-switch.yaml')
         # Store the credential-containing backup with the same restrictive JSON writer.
         common.save_json(backup + '.json', {'text': original})
-        state['pending'] = {'previous': snap['selected'], 'target': target,
+        state['pending'] = {'previous': snap['selected'], 'target': target, 'mode': snap['mode'],
+                            'selector': snap['selector'],
                             'started_at': time.time(), 'backup': backup + '.json'}
         state['last_attempt'] = time.time()
         if automatic:
@@ -434,11 +493,12 @@ class Guard:
         try:
             self.set_choice(snap, target)
             after = self.snapshot()
-            if after['selected'] != target or after['route']['leaf'] != target_graph['leaf']:
+            if (after['mode'] != snap['mode'] or after['selector'] != snap['selector']
+                    or after['selected'] != target or after['route']['leaf'] != target_graph['leaf']):
                 raise Error('切换后业务链与目标不符。')
             expected_live = copy.deepcopy(snap['live'])
-            expected_live[self.cfg['selector']]['now'] = target
-            expected_route = graph(snap['config'], expected_live, self.cfg['entry'])
+            expected_live[snap['selector']]['now'] = target
+            expected_route = graph(snap['config'], expected_live, snap['selector'] if snap['mode'] == 'global' else snap['entry'])
             if after['route']['fingerprint'] != expected_route['fingerprint']:
                 raise Error('切换后的依赖链与已测试依赖不符。')
             checked = self.business()
@@ -450,24 +510,29 @@ class Guard:
             latest = self.snapshot()
             if latest['token'] != after['token'] or policy.read(self.cfg['clash_config']) != original:
                 raise Error('切后复测期间发生外部配置/选路修改。')
-            policy.atomic_write(self.cfg['clash_config'], candidate)
+            if candidate != original:
+                policy.atomic_write(self.cfg['clash_config'], candidate)
             completed = self.snapshot()
-            if completed['selected'] != target:
+            if completed['mode'] != snap['mode'] or completed['selected'] != target:
                 raise Error('保存后选择发生变化。')
             state.update(token=completed['token'], last_switch=time.time(), failures=[], last_result=checked,
-                         last_good=checked if checked.get('ip') else {}, pending=None)
+                         last_good=checked if checked.get('ip') else {}, pending=None,
+                         runtime_mode=completed['mode'], runtime_selector=completed['selector'])
             self.save(state)
             emit('switched', previous=snap['selected'], target=target, ip=checked.get('ip'), restart=False)
             return True
         except BaseException:
             try:
-                actual = policy.api(snap['api'], '/proxies')['proxies'][self.cfg['selector']]['now']
+                current = self.snapshot()
+                if current['mode'] != snap['mode'] or current['selector'] != snap['selector']:
+                    raise Error('回退期间 Clash 模式或选择器已变化；不覆盖。')
+                actual = current['selected']
                 if actual not in (target, snap['selected']):
                     raise Error('外部选择已变化；不覆盖。')
                 if actual != snap['selected']:
                     self.set_choice(snap, snap['selected'])
                 disk = policy.read(self.cfg['clash_config'])
-                if disk == candidate:
+                if disk == candidate and candidate != original:
                     policy.atomic_write(self.cfg['clash_config'], original)
                 elif disk != original:
                     raise Error('外部配置已变化；不覆盖。')
@@ -494,6 +559,10 @@ class Guard:
                     or 'another update, switch, or evaluation is already running' in str(error)):
                 emit('busy', reason='shared mutation lock')
                 return 'busy'
+            if not readonly:
+                mode = self.runtime_mode()
+                if state.get('runtime_mode') != mode:
+                    self.hold_runtime_change(state, mode)
             raise
         logs = journal(self.cfg, state.get('journal_cursor_us', 0), now)
         report = self.business()
@@ -505,16 +574,30 @@ class Guard:
         emit('health', target=snap['selected'], journal_errors=logs['errors'], **report)
         if readonly:
             return 'readonly'
+        mode = self.runtime_mode()
+        if mode != snap['mode']:
+            self.hold_runtime_change(state, mode)
+            return 'changed'
         if state.get('pending'):
+            if (state.get('runtime_mode') != snap['mode']
+                    or state.get('runtime_selector') != snap['selector']):
+                # Keep the WAL for manual review, but never carry evidence or
+                # a result from the previous mode into the new selector.
+                self.hold_runtime_change(state, snap['mode'], snap['token'])
+                emit('hold', reason='runtime-mode-change-with-pending', until=state['hold_until'])
             emit('CRITICAL', message='存在未完成切换记录；仅探测，需人工 acknowledge。')
             return 'pending'
         # Changes to profile/config/manual selection all reset the evidence and hold off.
         cfg_hash = common.fingerprint(self.cfg)
         changed = state.get('token') != snap['token'] or state.get('profile_hash') != cfg_hash
         if changed or now < state.get('last_check', 0):
-            state.update(token=snap['token'], profile_hash=cfg_hash, failures=[], last_good={},
+            state.update(token=snap['token'], profile_hash=cfg_hash, runtime_mode=snap['mode'],
+                         runtime_selector=snap['selector'], failures=[], last_good={},
+                         last_result={},
                          hold_until=now + self.cfg['manual_hold_seconds'])
             emit('hold', reason='startup/config/manual change', until=state['hold_until'])
+            self.save(state)
+            return 'hold'
         last_check = state.get('last_check', 0)
         state.update(last_check=now, journal_cursor_us=logs['cursor_us'], last_result=report,
                      journal_errors=logs['errors'], journal_available=logs['available'])
@@ -549,7 +632,29 @@ class Guard:
             return 'evaluation-cooldown'
         state['last_evaluation'] = now
         self.save(state)
-        results, skipped = self.evaluate(snap)
+        try:
+            results, skipped = self.evaluate(snap)
+        except Error:
+            # evaluate() rechecks the snapshot after candidate probes. If the
+            # UI changed Clash mode or selector in that interval, clear the
+            # old evidence and enter the same protection period as a normal
+            # cycle boundary; never let the exception fall through to a
+            # stale transaction decision.
+            mode = self.runtime_mode()
+            if mode != snap['mode']:
+                self.hold_runtime_change(state, mode)
+                return 'changed'
+            latest = self.snapshot()
+            if latest['token'] == snap['token']:
+                raise
+            self.hold_runtime_change(state, latest['mode'], latest['token'])
+            emit('cancelled', reason='Clash mode, configuration or selection changed during evaluation')
+            return 'changed'
+        latest = self.snapshot()
+        if latest['token'] != snap['token']:
+            self.hold_runtime_change(state, latest['mode'], latest['token'])
+            emit('cancelled', reason='Clash mode, configuration or selection changed during evaluation')
+            return 'changed'
         common.save_json(os.path.join(self.cfg['state_dir'], 'evaluation.json'),
                          {'at': now, 'results': results, 'skipped': skipped})
         good = state.get('last_good', {})
@@ -580,7 +685,14 @@ class Guard:
             emit('would_switch', target=target, reason='observe mode; no mutation')
             return 'observe'
         # Repeat candidate test without using an old full-scan result.
-        fresh, _ = self.evaluate(snap, only=target)
+        try:
+            fresh, _ = self.evaluate(snap, only=target)
+        except Error:
+            mode = self.runtime_mode()
+            if mode != snap['mode']:
+                self.hold_runtime_change(state, mode)
+                return 'changed'
+            raise
         if not fresh[target]['ok']:
             emit('candidate_unstable', target=target)
             return 'unstable'
@@ -590,7 +702,8 @@ class Guard:
             return 'ip-changed'
         with common.locked(self.cfg['mutation_lock']):
             latest = self.snapshot()
-            if latest['token'] != snap['token']:
+            if (latest['token'] != snap['token'] or latest['mode'] != snap['mode']
+                    or latest['selector'] != snap['selector']):
                 emit('cancelled', reason='configuration or manual selection changed during evaluation')
                 return 'changed'
             current = self.business()
@@ -610,7 +723,10 @@ class Guard:
         candidates, skipped = self.candidates(snap)
         now = time.time()
         print('守护模式：{}；暂停：{}；未完成事务：{}'.format(self.cfg['mode'], bool(state.get('paused')), bool(state.get('pending'))))
-        print('业务入口：{} → {} → {}；物理出站：{}'.format(self.cfg['entry'], self.cfg['selector'], snap['selected'], snap['route']['leaf']))
+        if snap['mode'] == 'global':
+            print('Clash 模式：global；选择器：{} → {}；物理出站：{}'.format(snap['selector'], snap['selected'], snap['route']['leaf']))
+        else:
+            print('Clash 模式：rule；业务入口：{} → {} → {}；物理出站：{}'.format(self.cfg['entry'], snap['selector'], snap['selected'], snap['route']['leaf']))
         print('候选：{}；跳过：{}；连续失败：{}；24h自动尝试：{}/{}'.format(
             len(candidates), len(skipped), len(state.get('failures', [])),
             len([t for t in state.get('attempts', []) if now - t < 86400]), self.cfg['max_attempts_24h']))
@@ -689,7 +805,8 @@ class Guard:
                     status += ' {:.2f}s'.format(result['seconds'])
                 print('{}{} {} → {} / {} / {}'.format(i, '*' if name == snap['selected'] else '', name,
                       g['leaf'], status, result.get('ip') or '未知'))
-            print('当前：{}；跳过 {} 个不兼容候选。缓存成功不是长期可用保证。'.format(snap['selected'], len(skipped)))
+            print('Clash {} / {}，当前：{}；跳过 {} 个不兼容候选。缓存成功不是长期可用保证。'.format(
+                snap['mode'], snap['selector'], snap['selected'], len(skipped)))
             answer = input('编号=重新预检并确认切换；t=全量评估并刷新；0/回车=退出：').strip()
             if answer in ('', '0'):
                 return
@@ -719,7 +836,8 @@ def main():
                 guard.status(snap)
             else:
                 candidates, skipped = guard.candidates(snap)
-                emit('validate', mode=cfg['mode'], target=snap['selected'], leaf=snap['route']['leaf'],
+                emit('validate', mode=cfg['mode'], clash_mode=snap['mode'], selector=snap['selector'],
+                     target=snap['selected'], leaf=snap['route']['leaf'],
                      eligible=len(candidates), skipped=skipped)
         elif args.action in ('check', 'observe'):
             if args.action == 'check' and not cfg.get('activity', {}).get('enabled'):

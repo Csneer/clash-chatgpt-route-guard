@@ -1,6 +1,8 @@
 """Provider-neutral YAML/controller helpers used by the guard."""
+import http.client
 import json
 import os
+import socket
 import stat
 import tempfile
 import urllib.parse
@@ -91,26 +93,66 @@ def atomic_write(path, text):
             os.unlink(temporary)
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.socket_path = socket_path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        try:
+            self.sock.connect(self.socket_path)
+        except OSError:
+            self.sock.close()
+            self.sock = None
+            raise
+
+
+class UnixHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, socket_path):
+        super().__init__()
+        self.socket_path = socket_path
+
+    def http_open(self, request):
+        return self.do_open(lambda *args, **kwargs: UnixHTTPConnection(
+            self.socket_path, *args, **kwargs), request)
+
+
+class NoControllerRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
 def api(config, path, method='GET', data=None, timeout=3):
-    """Call only an explicitly configured loopback Mihomo controller."""
+    """Call a loopback TCP controller, or an explicitly configured Unix socket."""
     controller = config.get('external-controller', '127.0.0.1:9090')
-    try:
-        address = urllib.parse.urlsplit('http://' + controller)
-        valid = (address.hostname in ('127.0.0.1', '::1', 'localhost')
-                 and address.port is not None and not address.username
-                 and not address.password and not address.path
-                 and not address.query and not address.fragment)
-    except (TypeError, ValueError):
-        valid = False
-    if not valid:
-        raise PolicyError('controller must be a loopback address')
+    socket_path = config.get('external-controller-unix')
+    handlers = [urllib.request.ProxyHandler({})]
+    if not config.get('external-controller') and socket_path is not None:
+        if (not isinstance(socket_path, str) or not os.path.isabs(socket_path)
+                or '\0' in socket_path):
+            raise PolicyError('Unix controller must be an absolute local socket path')
+        controller = 'localhost'
+        handlers.extend([UnixHTTPHandler(socket_path), NoControllerRedirect()])
+    else:
+        try:
+            address = urllib.parse.urlsplit('http://' + controller)
+            valid = (address.hostname in ('127.0.0.1', '::1', 'localhost')
+                     and address.port is not None and not address.username
+                     and not address.password and not address.path
+                     and not address.query and not address.fragment)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise PolicyError('controller must be a loopback address')
     body = json.dumps(data).encode('utf-8') if data is not None else None
     request = urllib.request.Request('http://' + controller + path, data=body, method=method)
     if body is not None:
         request.add_header('Content-Type', 'application/json')
     if config.get('secret'):
         request.add_header('Authorization', 'Bearer ' + str(config['secret']))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(*handlers)
     with opener.open(request, timeout=timeout) as response:
         raw = response.read()
         return json.loads(raw) if raw else None

@@ -9,6 +9,9 @@ clash_config: /etc/mihomo/config.yaml
 binary: /usr/local/bin/mihomo
 selector: AI Route
 entry: AI Traffic
+# Guard observes Clash's live /configs mode and never changes it. In global
+# mode it monitors the built-in GLOBAL selector; in rule mode it monitors the
+# selector reached from entry above.
 business_proxy: http://127.0.0.1:7890
 controller: null
 

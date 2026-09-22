@@ -96,10 +96,57 @@ class EvidenceTests(DemandBase):
         r,b,e=self.run_cycle()
         self.assertEqual(r,'passive-healthy'); b.assert_not_called(); e.assert_not_called()
 
-    def test_idle_skips_controller_and_business(self):
-        with mock.patch.object(self.g,'snapshot') as s:
+    def test_idle_reads_only_controller_mode_without_business(self):
+        with mock.patch.object(self.g,'snapshot') as s, \
+                mock.patch.object(self.g,'runtime_mode',wraps=self.g.runtime_mode) as mode:
             r,b,e=self.run_cycle()
         self.assertEqual(r,'idle'); s.assert_not_called(); b.assert_not_called()
+        mode.assert_called_once(); e.assert_not_called()
+
+    def test_idle_mode_changes_follow_api_without_disk_edits(self):
+        before=policy.read(self.path)
+        for mode,selector,reason in (('global','GLOBAL','runtime-mode-hold'),
+                                     ('rule','Choice','runtime-mode-hold'),
+                                     ('direct',None,'unsupported-mode')):
+            self.runtime_mode=mode
+            r,b,e=self.run_cycle()
+            self.assertEqual(r,reason); b.assert_not_called(); e.assert_not_called()
+            state=self.state()
+            self.assertEqual(state['runtime_mode'],mode)
+            self.assertEqual(state['runtime_selector'],selector)
+            self.assertEqual(state['hold_until'],self.now+self.cfg['manual_hold_seconds'])
+        self.assertEqual(policy.read(self.path),before)
+
+    def test_mode_change_clears_evidence_preserves_limits_and_pending(self):
+        state=self.state()
+        state.update(failures=[9500],last_good=report(),last_result=report(False),
+                     attempts=[9400],last_attempt=9400,pending={'target':'B'})
+        state['demand'].update(confirmations=[9500],trace={'ip':'198.51.100.1'},
+                               probes=[9300],evaluations=[9200],last_probe=9300)
+        self.g.save(state); self.runtime_mode='global'; self.batch(self.now)
+        r,b,e=self.run_cycle()
+        self.assertEqual(r,'runtime-mode-hold'); b.assert_not_called(); e.assert_not_called()
+        current=self.state()
+        for field in ('failures','last_good','last_result','token'):
+            self.assertFalse(current[field])
+        for field in ('attempts','last_attempt','pending'):
+            self.assertEqual(current[field],state[field])
+        for field in ('probes','evaluations','last_probe'):
+            self.assertEqual(current['demand'][field],state['demand'][field])
+        self.assertEqual(current['demand']['baseline_at'],self.now)
+        self.assertEqual(current['demand']['consumed_until'],self.now)
+        self.assertFalse(current['demand']['trace']); self.assertFalse(current['demand']['confirmations'])
+
+    def test_controller_outage_clears_evidence_and_recovery_holds(self):
+        self.batch(self.now); self.run_cycle()
+        with mock.patch.object(self.g,'runtime_mode',side_effect=guard.Error('unavailable')):
+            r,b,e=self.run_cycle()
+        self.assertEqual(r,'runtime-mode-unavailable'); b.assert_not_called(); e.assert_not_called()
+        self.assertFalse(self.state()['failures'])
+        self.assertIsNone(self.state()['runtime_mode'])
+        self.now+=10
+        r,b,e=self.run_cycle()
+        self.assertEqual(r,'runtime-mode-hold'); b.assert_not_called(); e.assert_not_called()
 
     def test_continuous_success_for_hours_never_probes(self):
         with mock.patch.object(self.g,'business') as b:
@@ -330,6 +377,44 @@ class EscalationTests(DemandBase):
                 mock.patch.object(self.g,'transaction') as t:
             self.assertEqual(self.g.cycle(),'switched')
         self.assertEqual(e.call_count,2); self.assertEqual(t.call_args[1]['required_ip'],'198.51.100.1')
+
+    def test_mode_changed_during_confirmation_cancels_before_scan(self):
+        self.prepare()
+        def business():
+            self.runtime_mode='global'
+            return report(False)
+        with mock.patch.object(self.g,'business',side_effect=business) as b, \
+                mock.patch.object(self.g,'evaluate') as e, \
+                mock.patch.object(self.g,'transaction') as t:
+            self.assertEqual(self.g.cycle(),'runtime-mode-hold')
+        b.assert_called_once(); e.assert_not_called(); t.assert_not_called()
+        self.assertFalse(self.state()['failures'])
+        self.assertEqual(self.state()['runtime_mode'],'global')
+
+    def test_mode_changed_during_scan_cancels_without_further_probe(self):
+        self.prepare()
+        def evaluate(*args,**kw):
+            self.runtime_mode='global'
+            return {'B':dict(report(),leaf='B')},{}
+        with mock.patch.object(self.g,'business',return_value=report(False)) as b, \
+                mock.patch.object(self.g,'evaluate',side_effect=evaluate) as e, \
+                mock.patch.object(self.g,'transaction') as t:
+            self.assertEqual(self.g.cycle(),'runtime-mode-hold')
+        self.assertEqual(b.call_count,2); e.assert_called_once(); t.assert_not_called()
+        self.assertFalse(self.state()['demand']['confirmations'])
+
+    def test_scan_raises_on_mode_change_still_clears_evidence(self):
+        self.prepare()
+        def evaluate(*args,**kw):
+            self.runtime_mode='direct'
+            raise guard.Error('runtime changed during evaluation')
+        with mock.patch.object(self.g,'business',return_value=report(False)), \
+                mock.patch.object(self.g,'evaluate',side_effect=evaluate), \
+                mock.patch.object(self.g,'transaction') as t:
+            self.assertEqual(self.g.cycle(),'unsupported-mode')
+        t.assert_not_called()
+        self.assertFalse(self.state()['failures'])
+        self.assertFalse(self.state()['demand']['trace'])
 
     def test_real_success_during_scan_cancels_without_switch(self):
         self.prepare()
