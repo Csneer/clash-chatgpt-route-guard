@@ -391,18 +391,22 @@ class Guard:
             nodes.update(g['nodes'])
         results = {}
         with common.locked(self.cfg['probe_lock']):
-            with common.ProbeProcess(list(nodes.values()), binary=self.cfg['binary'],
-                                     client_fingerprint=snap['config'].get('client-fingerprint'),
-                                     allow_chains=True, ipv6=snap['config'].get('ipv6', False)) as process:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.cfg['concurrency']) as pool:
-                    jobs = {pool.submit(check_proxy, self.cfg, process.proxy(g['leaf'])): name for name, g in candidates.items()}
-                    for job in concurrent.futures.as_completed(jobs):
-                        name = jobs[job]
-                        result = job.result()
-                        result['graph'] = candidates[name]['fingerprint']
-                        result['leaf'] = candidates[name]['leaf']
-                        results[name] = result
-                        emit('candidate', target=name, **result)
+            def probe_one(name):
+                candidate = candidates[name]
+                with common.ProbeProcess(list(candidate['nodes'].values()), binary=self.cfg['binary'],
+                                         client_fingerprint=snap['config'].get('client-fingerprint'),
+                                         allow_chains=True, ipv6=snap['config'].get('ipv6', False),
+                                         target=candidate['leaf']) as process:
+                    return check_proxy(self.cfg, process.proxy(candidate['leaf']))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.cfg['concurrency']) as pool:
+                jobs = {pool.submit(probe_one, name): name for name in candidates}
+                for job in concurrent.futures.as_completed(jobs):
+                    name = jobs[job]
+                    result = job.result()
+                    result['graph'] = candidates[name]['fingerprint']
+                    result['leaf'] = candidates[name]['leaf']
+                    results[name] = result
+                    emit('candidate', target=name, **result)
         return results, skipped
 
     def business(self):

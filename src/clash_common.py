@@ -87,11 +87,19 @@ def fetch(proxy, url, timeout=10):
 
 
 class ProbeProcess:
-    """One isolated Mihomo with loopback listeners pinned to candidates."""
-    def __init__(self, nodes, binary, client_fingerprint=None, allow_chains=False, ipv6=True):
+    """One isolated Mihomo with a loopback mixed port pinned to one candidate.
+
+    Older Clash releases used by some installations do not support the
+    multi-listener configuration.  A one-candidate process is slightly more
+    expensive, but keeps the probe isolated and works with both old Clash and
+    newer Mihomo releases.
+    """
+    def __init__(self, nodes, binary, client_fingerprint=None, allow_chains=False,
+                 ipv6=True, target=None):
         self.nodes, self.binary = nodes, binary
         self.client_fingerprint = client_fingerprint
         self.allow_chains, self.ipv6 = allow_chains, ipv6
+        self.target = target
         self.temp = self.process = self.log = None
         self.ports = {}
 
@@ -110,23 +118,23 @@ class ProbeProcess:
 
             for name in lookup:
                 dependency(name, set())
-            listeners = []
-            for index, node in enumerate(self.nodes):
+            if self.target is not None and self.target not in lookup:
+                raise SelectorError('probe target is missing')
+            for node in self.nodes:
                 if node.get('dialer-proxy') and not self.allow_chains:
                     raise SelectorError('candidate depends on another outbound; chain probing is disabled')
-                sock = socket.socket()
-                sock.bind(('127.0.0.1', 0))
-                reservations.append(sock)
-                port = sock.getsockname()[1]
-                self.ports[node['name']] = port
-                listeners.append({'name': 'probe-' + str(index), 'type': 'http',
-                                  'listen': '127.0.0.1', 'port': port, 'proxy': node['name']})
+            sock = socket.socket()
+            sock.bind(('127.0.0.1', 0))
+            reservations.append(sock)
+            port = sock.getsockname()[1]
+            self.ports[self.target or self.nodes[0]['name']] = port
             config = {'mode': 'rule', 'allow-lan': False, 'bind-address': '127.0.0.1',
-                      'port': 0, 'socks-port': 0, 'mixed-port': 0, 'redir-port': 0, 'tproxy-port': 0,
+                      'port': 0, 'socks-port': 0, 'mixed-port': port, 'redir-port': 0, 'tproxy-port': 0,
                       'ipv6': self.ipv6, 'log-level': 'silent', 'geo-auto-update': False,
                       'dns': {'enable': False}, 'tun': {'enable': False},
                       'profile': {'store-selected': False, 'store-fake-ip': False},
-                      'proxies': self.nodes, 'listeners': listeners, 'rules': ['MATCH,REJECT']}
+                      'proxies': self.nodes,
+                      'rules': ['MATCH,' + (self.target or self.nodes[0]['name'])]}
             if self.client_fingerprint:
                 config['client-fingerprint'] = self.client_fingerprint
             path = os.path.join(self.temp.name, 'probe.yaml')
@@ -143,7 +151,7 @@ class ProbeProcess:
             self.log = open(os.path.join(self.temp.name, 'probe.log'), 'wb')
             self.process = subprocess.Popen(args, stdout=self.log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 8
-            pending = set(self.ports.values())
+            pending = {port}
             while pending and time.monotonic() < deadline:
                 if self.process.poll() is not None:
                     raise SelectorError('isolated probe process did not start')
@@ -166,7 +174,7 @@ class ProbeProcess:
                 sock.close()
 
     def proxy(self, name):
-        return 'http://127.0.0.1:' + str(self.ports[name])
+        return 'http://127.0.0.1:' + str(self.ports[self.target or name])
 
     def __exit__(self, *unused):
         if self.process is not None and self.process.poll() is None:
