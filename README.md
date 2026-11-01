@@ -1,8 +1,16 @@
 # Clash ChatGPT Route Guard
 
-一个保守的 Mihomo/Clash 出口守护方案：它把本机真实业务失败作为自动处理的前提，只在持续的网络类失败出现时，才复核 ChatGPT 兼容接口、隔离评估候选节点，并在满足安全条件后切换受管理的 `select` 组。
+Mihomo/Clash 出口管理工具，提供业务故障恢复、GLOBAL 自动选路和出口绑定三个独立入口。
 
-核心目标是避免“定时证明自己正常”造成固定外连特征，也避免因为一次 403、429、5xx、客户端取消或机场上游过载就换出口。正常调用和空闲时，systemd timer 只读取本地证据和 Clash 当前模式，不访问外部 ChatGPT 接口。
+| 入口 | 用途 | 触发方式 |
+| --- | --- | --- |
+| `clash-guard` | 根据业务网络错误复核并恢复 ChatGPT 路由 | 正常调用和空闲时只读取本地证据；持续网络失败后探测 |
+| [`global-auto`](docs/GLOBAL-AUTO.md) | 维护本机到节点的低延迟和稳定性 | GLOBAL 选中 `GLOBAL Stable Auto` 后周期测量 TCP 和 HTTPS，并轮转评估候选 |
+| [`global-egress-lock`](docs/GLOBAL-EGRESS.md) | 为手动选择的节点固定经过验证的入口，减少公网出口变化 | 跟随手动 GLOBAL 选择建立绑定，随后周期核验 |
+
+`global-auto` 以当前可用性为主评分，健康时主动切换需至少改善 100 ms；确认断网后，经过复测的可用候选可以先接管。它支持 Clash Verge 和使用静态 YAML 的系统 Mihomo，服务器部署见 [安装说明](docs/GLOBAL-AUTO-SERVER.md)。`global-egress-lock` 面向 Clash Verge，默认忽略自动组选路。不要让多个守护器同时控制同一个选择器。
+
+下方默认安装与业务证据说明针对 `clash-guard`。它只在持续的网络类失败出现时复核 ChatGPT 兼容接口、隔离评估候选并切换受管理的 `select` 组，避免因为一次 403、429、5xx、客户端取消或上游过载就换出口。
 
 ## 特性
 
@@ -15,11 +23,11 @@
 - 同出口优先，跨出口需要更长异常跨度并且显式 `allow_cross_ip: true`。
 - 切换前后重复检查，配置写入采用 WAL/原子替换；切后业务复测失败只回退一次，无法确认时保留 `pending` 并停止自动切换。
 - 手动 `menu`/`use`、`observe`、`probe` 和自动 `check` 入口分离。
-- Python 3.6 兼容写法；不读取或持久化调用正文、响应正文、Cookie 或账户凭据。
+- 原 `clash-guard` 保持 Python 3.6 兼容写法；GLOBAL 扩展使用 Python 3.8+。业务证据不读取或持久化调用正文、响应正文、Cookie 或账户凭据。
 
 ## 安装
 
-依赖：Linux、systemd、Python 3.6+、PyYAML、curl、可执行的 Mihomo，以及一个通过回环地址访问的 HTTP/mixed 业务代理。控制器支持回环 TCP 和 `external-controller-unix` 绝对 socket 路径；非空 TCP 配置优先。安装脚本不会启用定时器，也不会覆盖已有 profile。
+建议环境：Linux、systemd、Python 3.8+、PyYAML、curl、可执行的 Mihomo，以及一个通过回环地址访问的 HTTP/mixed 业务代理。仅使用原 `clash-guard` 时仍支持 Python 3.6+。控制器支持回环 TCP 和 `external-controller-unix` 绝对 socket 路径；非空 TCP 配置优先。出口绑定还需要 Node.js。安装脚本不会启用定时器，也不会覆盖已有 profile。
 
 ```bash
 git clone https://github.com/Csneer/clash-chatgpt-route-guard.git
@@ -61,6 +69,10 @@ clash-guard status
 安装脚本没有订阅下载器。不同机场的订阅格式、节点协议、转换器和更新时机属于 provider adapter；应在共享 `mutation_lock` 下接入，并先将新配置交给 `mihomo -t` 和 `clash-guard validate`。不要把包含订阅 URL、控制器 secret、节点密码或本机状态的文件放进这个仓库。
 
 ## 日常命令
+
+Clash Verge 的 GLOBAL 节点若使用多后端 DNS，可选用 [GLOBAL 自动出口绑定](docs/GLOBAL-EGRESS.md)：用户换节点后自动识别稳定入口，持久固定该节点，返回历史节点时复用原绑定。此功能有独立开关，不会为了测速更换 GLOBAL 节点。
+
+如希望自动维护本机到节点的低延迟与稳定性，可选择 [GLOBAL Stable Auto](docs/GLOBAL-AUTO.md)。仅 GLOBAL 选择该组时周期检测，主动择优需 TCP 中位延迟至少改善 100 ms；连续故障允许切到更慢但可用的节点。它不以 ChatGPT 直连结果排名，也不改独立链式代理首跳。
 
 ```bash
 clash-guard status                 # 本地状态；会读取 Clash 控制器
@@ -106,7 +118,13 @@ clash-guard status
 ./tests/run.sh
 ```
 
-真实 Mihomo 集成测试依赖本机二进制、openssl 和可用测试环境；它不应默认连接外部节点，因此可在单独的 CI/测试主机上扩展，不要在生产机上用线上配置做故障注入。
+真实 Mihomo 集成测试依赖本机二进制、openssl 和 Node.js，使用临时进程与本地 fixture。指定二进制运行完整套件：
+
+```bash
+MIHOMO_BINARY=/path/to/mihomo ./tests/run.sh
+```
+
+缺少运行依赖时部分测试会跳过，判断覆盖范围时需查看测试输出。测试不使用生产订阅，也不向生产选择器注入故障。
 
 ## 安全提醒
 

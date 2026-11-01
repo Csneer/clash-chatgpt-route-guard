@@ -1,0 +1,39 @@
+# Optional system Mihomo deployment; replace paths with the target host's values.
+version: 1
+group: GLOBAL Stable Auto
+config_source: static
+clash_config: /opt/clash/config.yaml
+controller_tcp: 127.0.0.1:9090
+controller_unix: ''
+binary: /opt/clash/mihomo
+state_dir: /var/lib/global-auto
+run_lock: /var/lib/global-auto/run.lock
+mutation_lock: /var/lib/global-auto/mutation.lock
+probe_lock: /var/lib/global-auto/probe.lock
+business_proxy: http://127.0.0.1:7890
+interval_seconds: 15
+scan_seconds: 600
+inventory_scan_seconds: 15
+candidate_max_age_seconds: 300
+failure_scan_seconds: 15
+node_cooldown_seconds: 600
+hold_seconds: 600
+manual_hold_seconds: 120
+switch_cooldown_seconds: 60
+max_switches_hour: 6
+batch_size: 2
+concurrency: 2
+candidate_rechecks: 3
+failure_count: 2
+stability_failure_count: 3
+max_jitter_ms: 250
+max_tcp_ms: 800
+tcp_samples: 3
+tcp_timeout_seconds: 1
+timeout_seconds: 3
+improvement_ms: 100
+checks:
+  - url: https://cp.cloudflare.com/generate_204
+    status: 204
+  - url: https://www.gstatic.com/generate_204
+    status: 204

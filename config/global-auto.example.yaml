@@ -1,0 +1,48 @@
+# Opt-in only: select GLOBAL Stable Auto in the built-in GLOBAL selector.
+# The group measures local TCP handshakes to ordinary SS nodes and then uses
+# two small HTTPS relay checks through an isolated Mihomo process.
+version: 1
+group: GLOBAL Stable Auto
+# verge verifies the active profile script/index; static reads the actual YAML only.
+config_source: verge
+clash_config: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml
+controller_unix: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/verge-mihomo.sock
+# A non-empty loopback host:port takes precedence over controller_unix.
+controller_tcp: ''
+binary: /usr/bin/verge-mihomo
+profile_script: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/current.js
+profiles_index: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles.yaml
+state_dir: /home/user/.local/state/global-auto
+run_lock: /home/user/.local/state/global-egress-lock/run.lock
+mutation_lock: /home/user/.local/state/global-egress-lock/mutation.lock
+probe_lock: /home/user/.local/state/global-egress-lock/probe.lock
+business_proxy: http://127.0.0.1:7890
+interval_seconds: 15
+# Decision cadence is separate from continuous inventory probing.
+scan_seconds: 600
+inventory_scan_seconds: 15
+candidate_max_age_seconds: 300
+failure_scan_seconds: 15
+node_cooldown_seconds: 600
+hold_seconds: 600
+manual_hold_seconds: 120
+switch_cooldown_seconds: 60
+max_switches_hour: 6
+batch_size: 2
+concurrency: 2
+# Recheck the next candidate if the fastest one fails; one live switch per round.
+candidate_rechecks: 3
+failure_count: 2
+stability_failure_count: 3
+max_jitter_ms: 250
+max_tcp_ms: 800
+tcp_samples: 3
+tcp_timeout_seconds: 1
+timeout_seconds: 3
+# Deliberate preference hysteresis: active switching needs >=100 ms improvement.
+improvement_ms: 100
+checks:
+  - url: https://cp.cloudflare.com/generate_204
+    status: 204
+  - url: https://www.gstatic.com/generate_204
+    status: 204

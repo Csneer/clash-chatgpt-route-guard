@@ -1,0 +1,11 @@
+[Unit]
+Description=Evaluate GLOBAL Stable Auto node quality on system Mihomo
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=global-auto-system.service
+
+[Install]
+WantedBy=timers.target

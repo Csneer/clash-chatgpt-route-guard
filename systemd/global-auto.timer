@@ -1,0 +1,11 @@
+[Unit]
+Description=Evaluate GLOBAL Stable Auto node quality
+
+[Timer]
+OnStartupSec=20s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=global-auto.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Select a stable low-latency node for the opt-in GLOBAL Stable Auto group
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/global-auto check
+UMask=0077
+TimeoutStartSec=12min
+TimeoutStopSec=20s
+KillMode=control-group
+Nice=10
+NoNewPrivileges=true

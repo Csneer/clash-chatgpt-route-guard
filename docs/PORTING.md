@@ -1,5 +1,7 @@
 # 迁移到其他机器
 
+本文针对基于业务证据的 `clash-guard`。如果目标是 GLOBAL 的周期测速与自动恢复，请使用 [GLOBAL Stable Auto 服务器部署](GLOBAL-AUTO-SERVER.md)；Clash Verge 的固定入口绑定见 [GLOBAL 自动出口绑定](GLOBAL-EGRESS.md)。
+
 ## 1. 先确认 Clash 拓扑
 
 在目标机上准备一份脱敏的拓扑认知：

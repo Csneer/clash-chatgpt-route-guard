@@ -1,0 +1,16 @@
+[Unit]
+Description=Select a stable low-latency node for GLOBAL Stable Auto
+After=network-online.target clash.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/global-auto --config /etc/clash-guard/global-auto.yaml check
+StateDirectory=global-auto
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=12min
+TimeoutStopSec=20s
+KillMode=control-group
+Nice=10
+NoNewPrivileges=true

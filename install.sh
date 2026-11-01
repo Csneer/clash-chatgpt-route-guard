@@ -28,8 +28,13 @@ install -m 0644 "$root_dir/src/clash_demand.py" "$(target "$lib_dir")/clash_dema
 install -m 0644 "$root_dir/src/clash_common.py" "$(target "$lib_dir")/clash_common.py"
 install -m 0644 "$root_dir/src/mihomo_manualize.py" "$(target "$lib_dir")/mihomo_manualize.py"
 install -m 0644 "$root_dir/src/mihomo_policy.py" "$(target "$lib_dir")/mihomo_policy.py"
+install -m 0644 "$root_dir/src/global_egress.py" "$(target "$lib_dir")/global_egress.py"
+install -m 0644 "$root_dir/src/global_node_score.py" "$(target "$lib_dir")/global_node_score.py"
+install -m 0644 "$root_dir/src/global_auto.py" "$(target "$lib_dir")/global_auto.py"
 install -m 0755 "$root_dir/bin/clash-guard" "$(target "${PREFIX:-/usr/local}/sbin")/clash-guard"
 install -m 0755 "$root_dir/bin/mihomo-manualize" "$(target "${PREFIX:-/usr/local}/sbin")/mihomo-manualize"
+install -m 0755 "$root_dir/bin/global-egress-lock" "$(target "${PREFIX:-/usr/local}/sbin")/global-egress-lock"
+install -m 0755 "$root_dir/bin/global-auto" "$(target "${PREFIX:-/usr/local}/sbin")/global-auto"
 service_file=$(mktemp)
 trap 'rm -f "$service_file"' EXIT
 sed "s#^ExecStart=.*#ExecStart=${PREFIX:-/usr/local}/sbin/clash-guard check#" \
@@ -45,6 +50,9 @@ else
 fi
 install -m 0600 "$root_dir/config/config.example.yaml" "$(target "$config_dir")/config.example.yaml"
 install -m 0600 "$root_dir/config/config.codex-proxy.example.yaml" "$(target "$config_dir")/config.codex-proxy.example.yaml"
+install -m 0600 "$root_dir/config/global-egress.example.yaml" "$(target "$config_dir")/global-egress.example.yaml"
+install -m 0600 "$root_dir/config/global-auto.example.yaml" "$(target "$config_dir")/global-auto.example.yaml"
+install -m 0600 "$root_dir/config/global-auto.system.example.yaml" "$(target "$config_dir")/global-auto.system.example.yaml"
 
 if [[ -z "$destdir" ]] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
@@ -52,6 +60,8 @@ fi
 
 cat <<'NOTICE'
 Installation complete. The timer was not enabled or started.
+GLOBAL companion services are opt-in; see docs/GLOBAL-AUTO.md,
+docs/GLOBAL-AUTO-SERVER.md and docs/GLOBAL-EGRESS.md for installation.
 
 Next steps:
   1. Edit /etc/clash-guard/config.yaml and keep mode: observe initially.

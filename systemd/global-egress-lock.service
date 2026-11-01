@@ -1,0 +1,12 @@
+[Unit]
+Description=Bind the user's current GLOBAL node to a stable upstream entry
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/global-egress-lock check
+UMask=0077
+TimeoutStartSec=12min
+TimeoutStopSec=20s
+KillMode=control-group
+Nice=10
+NoNewPrivileges=true

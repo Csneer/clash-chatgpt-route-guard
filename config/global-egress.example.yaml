@@ -1,0 +1,25 @@
+# Optional Clash Verge companion. Enable only after replacing all local paths.
+# It follows the user's GLOBAL selection; it does not select another node.
+version: 1
+clash_config: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml
+binary: /usr/bin/verge-mihomo
+controller_unix: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/verge-mihomo.sock
+profile_script: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/your-profile.js
+profiles_index: /home/user/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles.yaml
+state_dir: /home/user/.local/state/global-egress-lock
+node_binary: /usr/bin/node
+business_proxy: http://127.0.0.1:7890
+mutation_lock: /home/user/.local/state/global-egress-lock/mutation.lock
+probe_lock: /home/user/.local/state/global-egress-lock/probe.lock
+trace_urls:
+  - https://api.ipify.org
+  - https://ifconfig.me/ip
+sample_count: 3
+sample_gap_seconds: 1
+timeout_seconds: 10
+max_dns_candidates: 6
+settle_seconds: 5
+retry_seconds: 600
+verify_interval_seconds: 900
+# Never pin/reload nodes while a separate selector owns automatic selection.
+unmanaged_global_selections: [GLOBAL Stable Auto]

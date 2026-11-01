@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec /usr/bin/python3 -B "${CLASH_GUARD_LIB:-/usr/local/lib/clash-chatgpt-route-guard}/global_auto.py" "$@"
