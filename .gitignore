@@ -8,6 +8,7 @@ __pycache__/
 # Never commit live Clash/codex-proxy material.
 *.yaml
 *.yml
+!.github/workflows/ci.yml
 !config/*.example.yaml
 *.json
 !package.json

@@ -1,6 +1,12 @@
 # Clash ChatGPT Route Guard
 
+[![CI](https://github.com/Csneer/clash-chatgpt-route-guard/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Csneer/clash-chatgpt-route-guard/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Csneer/clash-chatgpt-route-guard)](https://github.com/Csneer/clash-chatgpt-route-guard/releases)
+[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Mihomo/Clash 出口管理工具，提供业务故障恢复、GLOBAL 自动选路和出口绑定三个独立入口。
+
+[发行版本](https://github.com/Csneer/clash-chatgpt-route-guard/releases) · [变更记录](CHANGELOG.md)
 
 | 入口 | 用途 | 触发方式 |
 | --- | --- | --- |
@@ -125,6 +131,8 @@ MIHOMO_BINARY=/path/to/mihomo ./tests/run.sh
 ```
 
 缺少运行依赖时部分测试会跳过，判断覆盖范围时需查看测试输出。测试不使用生产订阅，也不向生产选择器注入故障。
+
+[GitHub Actions](https://github.com/Csneer/clash-chatgpt-route-guard/actions/workflows/ci.yml) 在 Ubuntu 24.04 上安装系统 Python 3.12、PyYAML、Node.js 和 OpenSSL，下载并校验固定的 Mihomo `v1.19.33`，通过依赖预检后执行上述完整套件。CI 还在临时 `DESTDIR` 中验证安装和四个命令入口，不启用系统服务。此环境的通过结果不代表所有 Python、Mihomo 版本或实际订阅均已验证。
 
 ## 安全提醒
 

@@ -1,0 +1,58 @@
+name: Tests and staged install
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIHOMO_VERSION: v1.19.33
+      MIHOMO_SHA256: 386508bfb1c72c43b6a0eda73708ecdce82546581b0ebcb16366c53757c622b6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3 python3-yaml nodejs openssl curl
+      - name: Download and verify Mihomo
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
+            --output "$RUNNER_TEMP/mihomo.gz"
+          printf '%s  %s\n' "$MIHOMO_SHA256" "$RUNNER_TEMP/mihomo.gz" | sha256sum --check --strict
+          gzip -dc "$RUNNER_TEMP/mihomo.gz" > "$RUNNER_TEMP/mihomo"
+          chmod 0755 "$RUNNER_TEMP/mihomo"
+          echo "MIHOMO_BINARY=$RUNNER_TEMP/mihomo" >> "$GITHUB_ENV"
+      - name: Check native test prerequisites
+        run: |
+          test -x "$MIHOMO_BINARY"
+          test -x /usr/bin/node
+          test -x /usr/bin/openssl
+          python3 -c 'import sys, yaml; print(sys.version); print("PyYAML", yaml.__version__)'
+          /usr/bin/node --version
+          /usr/bin/openssl version
+          "$MIHOMO_BINARY" -v
+      - name: Run unit and native Mihomo tests
+        run: ./tests/run.sh
+      - name: Verify staged installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          DESTDIR="$stage" PREFIX=/opt/clash-guard ./install.sh
+          export CLASH_GUARD_LIB="$stage/opt/clash-guard/lib/clash-chatgpt-route-guard"
+          for command in clash-guard mihomo-manualize global-egress-lock global-auto; do
+            "$stage/opt/clash-guard/sbin/$command" --help
+          done
